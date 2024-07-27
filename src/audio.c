@@ -1,0 +1,273 @@
+﻿/*
+ * @Author: RetliveAdore lizaterop@gmail.com
+ * @Date: 2024-07-12 20:43:02
+ * @LastEditors: RetliveAdore lizaterop@gmail.com
+ * @LastEditTime: 2024-07-27 19:05:08
+ * @FilePath: \Crystal-Audio\src\audio.c
+ * @Description: 
+ * Coptright (c) 2024 by RetliveAdore-lizaterop@gmail.com, All Rights Reserved. 
+ */
+#include <AudioDfs.h>
+
+extern void** CRCoreFunList;
+extern void** CRThreadFunList;
+#define PREFTIMES_PER_SEC 100000
+
+#ifdef CR_WINDOWS
+#include <initguid.h>  //这个头文件一定要在最前面引用
+#include <Windows.h>
+#include <audiopolicy.h>
+#include <Audioclient.h>
+#include <mmdeviceapi.h>
+
+static IMMDeviceEnumerator* pEnumerator = NULL;
+
+typedef struct
+{
+	CRUINT8 magic;
+	IMMDevice* pDevice;
+	IAudioClient* pAudioClient;
+	IAudioRenderClient* pRenderClient;
+	CRWWINFO* inf;
+	CRSTRUCTURE dynPcm;
+	/*专用于数据流模式，其他模式中被忽略*/
+	CRAudioStreamCbk cbk;
+
+	CRUINT32 hnsActualDuration;
+	CRUINT32 bufferFrameCount;
+	CRUINT32 numFramesAvailable;
+	CRUINT32 numFramesPadding;
+	CRUINT32 offs;
+
+	CRTHREAD idThis;
+	//symbols
+	CRBOOL stop;
+	CRBOOL pause;
+}AUTHRINF;
+
+#elif defined CR_LINUX
+#define ALSA_PCM_NEW_HW_PARAMS_API
+#include <alsa/asoundlib.h>
+
+typedef struct
+{
+	CRUINT8 magic;
+	snd_pcm_t* handle;
+	snd_pcm_uframes_t frames;
+	/*专用于数据流模式，其他模式中被忽略*/
+	CRAudioStreamCbk cbk;
+
+	CRWWINFO* inf;
+	CRSTRUCTURE dynPcm;
+	CRUINT32 offs;
+
+	CRTHREAD idThis;
+	//symbols
+	CRBOOL stop;
+	CRBOOL pause;
+	int alsa_can_pause;
+
+	CRBOOL stream;
+}AUTHRINF;
+
+#endif
+
+CRBOOL _inner_craudio_init_()
+{
+    #ifdef CR_WINDOWS
+    CoInitializeEx(NULL, COINIT_MULTITHREADED | COINIT_SPEED_OVER_MEMORY);
+    #endif
+    if (FAILED(CoCreateInstance(&CLSID_MMDeviceEnumerator,
+		NULL, CLSCTX_ALL, &IID_IMMDeviceEnumerator,
+		(void**)&pEnumerator)))
+    {
+        CR_LOG_ERR("auto", "Failed Create COM Instance");
+        return CRFALSE;
+    }
+    return CRTRUE;
+}
+
+void _inner_craudio_uninit_()
+{
+    #ifdef CR_WINDOWS
+    CoUninitialize();
+    #endif
+}
+
+#ifdef CR_WINDOWS
+static CRBOOL _inner_create_device_(AUTHRINF *thinf, CRWWINFO *inf)
+{
+	WAVEFORMATEX *pwfx = NULL;
+	if (FAILED(
+			pEnumerator->lpVtbl->GetDefaultAudioEndpoint(
+				pEnumerator,
+				eRender,
+				eConsole,
+				&(thinf->pDevice)
+			)
+		)
+	)
+	{
+		CR_LOG_ERR("auto", "failed get endpoint");
+		goto Failed;
+	}
+	if (FAILED(
+			thinf->pDevice->lpVtbl->Activate(
+				thinf->pDevice,
+				&IID_IAudioClient,
+				CLSCTX_ALL,
+				NULL,
+				(void**)&(thinf->pAudioClient)
+			)
+		)
+	)
+	{
+		CR_LOG_ERR("auto", "failed active client");
+		goto Failed;
+	}
+	if (FAILED(
+			thinf->pAudioClient->lpVtbl->GetMixFormat(
+				thinf->pAudioClient,
+				&pwfx
+			)
+		)
+	)
+	{
+		CR_LOG_ERR("auto", "failed get format");
+		goto Failed;
+	}
+	//设置音频数据流信息
+	pwfx->wFormatTag = inf->AudioFormat;
+	pwfx->nChannels = inf->NumChannels;
+	pwfx->nSamplesPerSec = inf->SampleRate;
+	pwfx->nAvgBytesPerSec = inf->ByteRate;
+	pwfx->nBlockAlign = inf->BlockAlign;
+	pwfx->wBitsPerSample = inf->BitsPerSample;
+	pwfx->cbSize = 0;
+	//
+	if (FAILED(
+			thinf->pAudioClient->lpVtbl->Initialize(
+				thinf->pAudioClient,
+				AUDCLNT_SHAREMODE_SHARED,
+				AUDCLNT_STREAMFLAGS_AUTOCONVERTPCM | AUDCLNT_STREAMFLAGS_SRC_DEFAULT_QUALITY,
+				PREFTIMES_PER_SEC,
+				0,
+				pwfx,
+				NULL
+			)
+		)
+	)
+	{
+		CR_LOG_ERR("auto", "failed initialize");
+		goto Failed;
+	}
+	if (FAILED(
+			thinf->pAudioClient->lpVtbl->GetBufferSize(
+				thinf->pAudioClient,
+				&(thinf->bufferFrameCount)
+			)
+		)
+	)
+	{
+		CR_LOG_ERR("auto", "failed get buffer size");
+		goto Failed;
+	}
+	if (FAILED(
+			thinf->pAudioClient->lpVtbl->GetService(
+				thinf->pAudioClient,
+				&IID_IAudioRenderClient,
+				(void**)&(thinf->pRenderClient)
+			)
+		)
+	)
+	{
+		CR_LOG_ERR("auto", "failed get service");
+		goto Failed;
+	}
+	CoTaskMemFree(pwfx);
+	return CRTRUE;
+Failed:
+	if (pwfx) CoTaskMemFree(pwfx);
+	return CRFALSE;
+}
+#elif defined CR_LINUX
+static CRBOOL _inner_create_device_(AUTHRINF *thinf, CRWWINFO *inf)
+{
+	return CRTRUE;
+}
+#endif
+
+static void _inner_audio_thread_(void* data, CRTHREAD idThis)
+{
+	AUTHRINF *auinf = (AUTHRINF*)data;
+	CRUINT8* pData = NULL;
+	CRBOOL paused = CRTRUE;
+	while (!auinf->stop)
+	{
+		CRSleep(auinf->hnsActualDuration / 2);
+	}
+}
+
+CRAPI CRAUDIO CRAudioCreate(CRAudioStreamCbk cbk, CRWWINFO* inf)
+{
+	if (!cbk)
+	{
+		CR_LOG_WAR("auto", "callback function is NULL");
+		return NULL;
+	}
+	if (!inf)
+	{
+		CR_LOG_WAR("auto", "invalid inf");
+		return NULL;
+	}
+	AUTHRINF *thinf = CRAlloc(NULL, sizeof(AUTHRINF));
+	if (!thinf)
+	{
+		CR_LOG_ERR("auto", "bad alloc");
+		return NULL;
+	}
+	thinf->cbk = cbk;
+	thinf->inf = inf;
+	thinf->stop = CRFALSE;
+	thinf->pause = CRFALSE;
+	thinf->pDevice = NULL;
+	thinf->pAudioClient = NULL;
+	thinf->pRenderClient = NULL;
+	thinf->hnsActualDuration = 0;
+	thinf->bufferFrameCount = 0;
+	thinf->numFramesAvailable = 0;
+	thinf->numFramesPadding = 0;
+	thinf->offs = 0;
+	//
+	if (!_inner_create_device_(thinf, inf))
+	{
+		CR_LOG_ERR("auto", "failed create device");
+		CRAlloc(thinf, 0);
+		goto Failed;
+	}
+	BYTE *pData = NULL;
+	if (FAILED(thinf->pRenderClient->lpVtbl->GetBuffer(
+		thinf->pRenderClient,
+		thinf->bufferFrameCount,
+		&pData)))
+		goto Failed;
+	//写缓冲
+	thinf->cbk(pData, thinf->numFramesAvailable, thinf->numFramesAvailable * thinf->inf->BlockAlign);
+	if (FAILED(thinf->pRenderClient->lpVtbl->ReleaseBuffer(
+		thinf->pRenderClient,
+		thinf->bufferFrameCount,
+		0)))
+		goto Failed;
+	//
+	thinf->idThis = CRThread(_inner_audio_thread_, thinf);
+	return thinf;
+Failed:
+	if (thinf->pDevice)
+		thinf->pDevice->lpVtbl->Release(thinf->pDevice);
+	if (thinf->pAudioClient)
+		thinf->pAudioClient->lpVtbl->Release(thinf->pAudioClient);
+	if (thinf->pRenderClient)
+		thinf->pRenderClient->lpVtbl->Release(thinf->pRenderClient);
+	CR_LOG_ERR("auto", "an error heppened while creating audio device");
+	return NULL;
+}
