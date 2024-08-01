@@ -2,7 +2,7 @@
  * @Author: RetliveAdore lizaterop@gmail.com
  * @Date: 2024-07-12 20:43:02
  * @LastEditors: RetliveAdore lizaterop@gmail.com
- * @LastEditTime: 2024-08-01 23:40:16
+ * @LastEditTime: 2024-08-01 23:52:32
  * @FilePath: \Crystal-Audio\src\audio.c
  * @Description: 
  * Coptright (c) 2024 by RetliveAdore-lizaterop@gmail.com, All Rights Reserved. 
@@ -274,7 +274,7 @@ CRAPI CRAUDIO CRAudioCreate(CRAudioStreamCbk cbk, CRWWINFO* inf)
 	thinf->cbk = cbk;
 	thinf->inf = inf;
 	thinf->stop = CRFALSE;
-	thinf->pause = CRFALSE;
+	thinf->pause = CRTRUE;  //初始暂停
 	thinf->pDevice = NULL;
 	thinf->pAudioClient = NULL;
 	thinf->pRenderClient = NULL;
@@ -377,4 +377,24 @@ CRAPI CRBOOL CRLoadWW(const CRCHAR* path, CRSTRUCTURE out, CRWWINFO *inf)
 Failed:
 	CR_LOG_WAR("auto", "invalid file");
 	return CRFALSE;
+}
+
+CRAPI void CRAudioClose(CRAUDIO play)
+{
+	AUTHRINF *pInner = (AUTHRINF*)play;
+	if (pInner) pInner->stop = CRTRUE;
+	CRWaitThread(pInner->idThis);
+	CRAlloc(pInner, 0);
+}
+
+CRAPI void CRAudioPause(CRAUDIO play)
+{
+	AUTHRINF *pInner = (AUTHRINF*)play;
+	if (pInner) pInner->pause = CRFALSE;
+}
+
+CRAPI void CRAudioResume(CRAUDIO play)
+{
+	AUTHRINF *pInner = (AUTHRINF*)play;
+	if (pInner) pInner->pause = CRFALSE;
 }
