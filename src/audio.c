@@ -2,7 +2,7 @@
  * @Author: RetliveAdore lizaterop@gmail.com
  * @Date: 2024-07-12 20:43:02
  * @LastEditors: RetliveAdore lizaterop@gmail.com
- * @LastEditTime: 2024-08-01 21:54:03
+ * @LastEditTime: 2024-08-01 23:40:16
  * @FilePath: \Crystal-Audio\src\audio.c
  * @Description: 
  * Coptright (c) 2024 by RetliveAdore-lizaterop@gmail.com, All Rights Reserved. 
@@ -238,12 +238,12 @@ static void _inner_audio_thread_(void* data, CRTHREAD idThis)
 				paused = CRFALSE;
 			}
 		}
-		CRSleep(auinf->hnsActualDuration / 2);
-		auinf->pAudioClient->lpVtbl->Stop(auinf->pAudioClient);
-		auinf->pDevice->lpVtbl->Release(auinf->pDevice);
-		auinf->pAudioClient->lpVtbl->Release(auinf->pAudioClient);
-		auinf->pRenderClient->lpVtbl->Release(auinf->pRenderClient);
 	}
+	CRSleep(auinf->hnsActualDuration / 2);
+	auinf->pAudioClient->lpVtbl->Stop(auinf->pAudioClient);
+	auinf->pDevice->lpVtbl->Release(auinf->pDevice);
+	auinf->pAudioClient->lpVtbl->Release(auinf->pAudioClient);
+	auinf->pRenderClient->lpVtbl->Release(auinf->pRenderClient);
 }
 
 #elif defined CR_LINUX
