@@ -2,7 +2,7 @@
  * @Author: RetliveAdore lizaterop@gmail.com
  * @Date: 2024-07-12 20:32:45
  * @LastEditors: RetliveAdore lizaterop@gmail.com
- * @LastEditTime: 2024-07-27 19:04:48
+ * @LastEditTime: 2024-07-28 22:49:57
  * @FilePath: \Crystal-Audio\include\AudioDfs.h
  * @Description: 
  * Coptright (c) 2024 by RetliveAdore-lizaterop@gmail.com, All Rights Reserved. 
@@ -11,6 +11,7 @@
 #define _INCLUDE_CRYSTALAUDIODFS_H_
 
 #include <CrystalCore.h>
+#include <CrystalAlgorithms.h>
 #include <CrystalThread.h>
 
 typedef CRLVOID CRAUDIO;

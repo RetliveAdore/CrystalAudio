@@ -1,6 +1,7 @@
 INCLUDE_PATHS := .\include
 INCLUDE_PATHS += .\CrystalCore\include
 INCLUDE_PATHS += .\CrystalThread\include
+INCLUDE_PATHS += .\CrystalAlgorithms\include
 
 LIBRARIES := winmm
 LIBRARIES += ole32

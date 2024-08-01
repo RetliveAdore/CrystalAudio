@@ -2,15 +2,15 @@
  * @Author: RetliveAdore lizaterop@gmail.com
  * @Date: 2024-07-12 20:43:02
  * @LastEditors: RetliveAdore lizaterop@gmail.com
- * @LastEditTime: 2024-07-27 19:05:08
+ * @LastEditTime: 2024-08-01 21:54:03
  * @FilePath: \Crystal-Audio\src\audio.c
  * @Description: 
  * Coptright (c) 2024 by RetliveAdore-lizaterop@gmail.com, All Rights Reserved. 
  */
 #include <AudioDfs.h>
+#include <stdio.h>
+#include <string.h>
 
-extern void** CRCoreFunList;
-extern void** CRThreadFunList;
 #define PREFTIMES_PER_SEC 100000
 
 #ifdef CR_WINDOWS
@@ -190,12 +190,16 @@ Failed:
 	if (pwfx) CoTaskMemFree(pwfx);
 	return CRFALSE;
 }
-#elif defined CR_LINUX
-static CRBOOL _inner_create_device_(AUTHRINF *thinf, CRWWINFO *inf)
+
+static void _fill_buffer_(CRUINT8* Dst, CRSTRUCTURE Src, CRUINT32 frameCount, CRWWINFO* inf, CRUINT32* offs)
 {
-	return CRTRUE;
+	CRUINT32 size = frameCount * inf->BlockAlign;
+	for (int i = 0; i < size; i++)
+		CRDynSeek(Src, (CRUINT8*)&Dst[i], *offs + i, DYN_MODE_8);
+	*offs += size;
+	if (*offs > CRStructureSize(Src))
+		*offs = CRStructureSize(Src);
 }
-#endif
 
 static void _inner_audio_thread_(void* data, CRTHREAD idThis)
 {
@@ -205,8 +209,49 @@ static void _inner_audio_thread_(void* data, CRTHREAD idThis)
 	while (!auinf->stop)
 	{
 		CRSleep(auinf->hnsActualDuration / 2);
+		if (!paused)
+		{
+			if (auinf->pause)
+			{
+				auinf->pAudioClient->lpVtbl->Stop(auinf->pAudioClient);
+				paused = CRTRUE;
+			}
+			else
+			{
+				//查询剩余空闲空间
+				if (FAILED(auinf->pAudioClient->lpVtbl->GetCurrentPadding(auinf->pAudioClient, &auinf->numFramesPadding)))
+					return;
+				auinf->numFramesAvailable = auinf->bufferFrameCount - auinf->numFramesPadding;
+				HRESULT hr = 0;
+				if (FAILED(hr = auinf->pRenderClient->lpVtbl->GetBuffer(auinf->pRenderClient, auinf->numFramesAvailable, &pData)))
+					return;
+				auinf->cbk(pData, auinf->numFramesAvailable, auinf->numFramesAvailable * auinf->inf->BlockAlign);
+				if (FAILED(auinf->pRenderClient->lpVtbl->ReleaseBuffer(auinf->pRenderClient, auinf->numFramesAvailable, 0)))
+					return;
+			}
+		}
+		else
+		{
+			if (!auinf->pause)
+			{
+				auinf->pAudioClient->lpVtbl->Start(auinf->pAudioClient);
+				paused = CRFALSE;
+			}
+		}
+		CRSleep(auinf->hnsActualDuration / 2);
+		auinf->pAudioClient->lpVtbl->Stop(auinf->pAudioClient);
+		auinf->pDevice->lpVtbl->Release(auinf->pDevice);
+		auinf->pAudioClient->lpVtbl->Release(auinf->pAudioClient);
+		auinf->pRenderClient->lpVtbl->Release(auinf->pRenderClient);
 	}
 }
+
+#elif defined CR_LINUX
+static CRBOOL _inner_create_device_(AUTHRINF *thinf, CRWWINFO *inf)
+{
+	return CRTRUE;
+}
+#endif
 
 CRAPI CRAUDIO CRAudioCreate(CRAudioStreamCbk cbk, CRWWINFO* inf)
 {
@@ -270,4 +315,66 @@ Failed:
 		thinf->pRenderClient->lpVtbl->Release(thinf->pRenderClient);
 	CR_LOG_ERR("auto", "an error heppened while creating audio device");
 	return NULL;
+}
+
+static CRBOOL _inner_compare_chars_(const char* chars1, const char* chars2, CRUINT32 len)
+{
+	for (int i = 0; i < len; i++)
+		if (chars1[i] != chars2[i]) return CRFALSE;
+	return CRTRUE;
+}
+
+CRAPI CRBOOL CRLoadWW(const CRCHAR* path, CRSTRUCTURE out, CRWWINFO *inf)
+{
+	if (!inf)
+	{
+		CR_LOG_ERR("auto", "invalid wwinf");
+		return CRFALSE;
+	}
+	FILE *fp = fopen(path, "rb");
+	if (!fp)
+	{
+		CR_LOG_WAR("auto", "couldn't open wav file");
+		return CRFALSE;
+	}
+	CRWWHEADER header;
+	CRWWBLOCK block;
+	fread(&header, sizeof(CRWWHEADER), 1, fp);
+	//假如不符合说明文件出错了
+	if (!_inner_compare_chars_((CRUINT8*)&header.whole.ChunkID, "RIFF", 4)) goto Failed;
+	if (!_inner_compare_chars_((CRUINT8*)&header.format, "WAVE", 4)) goto Failed;
+	//
+	fread(&block, sizeof(block), 1, fp);
+	while (!_inner_compare_chars_((CRUINT8*)&block.ChunkID, "data", 4))
+	{
+		fseek(fp, block.ChunkSize, SEEK_CUR);
+		if (!fread(&block, sizeof(block), 1, fp))
+			break;
+	}
+	if (!_inner_compare_chars_((CRUINT8*)&block.ChunkID, "data", 4))
+		goto Failed;
+	//现在是正常加载情况
+	//
+	CRUINT8* buffer = CRAlloc(NULL, block.ChunkSize);
+	if (!buffer)
+	{
+		fclose(fp);
+		CR_LOG_ERR("auto", "bad alloc");
+		return CRFALSE;
+	}
+	if (fread(buffer,1 ,block.ChunkSize, fp) != block.ChunkSize) //然后就遇到不正常的情况了
+	{
+		CRAlloc(buffer, 0);
+		goto Failed;
+	}
+	CRCODE code = CRDynSetup(out, buffer, block.ChunkSize);
+	CRAlloc(buffer, 0);
+	//
+	fclose(fp);
+	memcpy(inf, &header.inf, sizeof(CRWWINFO));
+	//
+	return CRTRUE;
+Failed:
+	CR_LOG_WAR("auto", "invalid file");
+	return CRFALSE;
 }
