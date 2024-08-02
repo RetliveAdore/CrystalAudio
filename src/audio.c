@@ -76,7 +76,6 @@ CRBOOL _inner_craudio_init_()
 {
     #ifdef CR_WINDOWS
     CoInitializeEx(NULL, COINIT_MULTITHREADED | COINIT_SPEED_OVER_MEMORY);
-    #endif
     if (FAILED(CoCreateInstance(&CLSID_MMDeviceEnumerator,
 		NULL, CLSCTX_ALL, &IID_IMMDeviceEnumerator,
 		(void**)&pEnumerator)))
@@ -84,6 +83,7 @@ CRBOOL _inner_craudio_init_()
         CR_LOG_ERR("auto", "Failed Create COM Instance");
         return CRFALSE;
     }
+    #endif
     return CRTRUE;
 }
 
@@ -92,6 +92,16 @@ void _inner_craudio_uninit_()
     #ifdef CR_WINDOWS
     CoUninitialize();
     #endif
+}
+
+static void _fill_buffer_(CRUINT8* Dst, CRSTRUCTURE Src, CRUINT32 frameCount, CRWWINFO* inf, CRUINT32* offs)
+{
+	CRUINT32 size = frameCount * inf->BlockAlign;
+	for (int i = 0; i < size; i++)
+		CRDynSeek(Src, (CRUINT8*)&Dst[i], *offs + i, DYN_MODE_8);
+	*offs += size;
+	if (*offs > CRStructureSize(Src))
+		*offs = CRStructureSize(Src);
 }
 
 #ifdef CR_WINDOWS
@@ -191,16 +201,6 @@ Failed:
 	return CRFALSE;
 }
 
-static void _fill_buffer_(CRUINT8* Dst, CRSTRUCTURE Src, CRUINT32 frameCount, CRWWINFO* inf, CRUINT32* offs)
-{
-	CRUINT32 size = frameCount * inf->BlockAlign;
-	for (int i = 0; i < size; i++)
-		CRDynSeek(Src, (CRUINT8*)&Dst[i], *offs + i, DYN_MODE_8);
-	*offs += size;
-	if (*offs > CRStructureSize(Src))
-		*offs = CRStructureSize(Src);
-}
-
 static void _inner_audio_thread_(void* data, CRTHREAD idThis)
 {
 	AUTHRINF *auinf = (AUTHRINF*)data;
@@ -247,12 +247,93 @@ static void _inner_audio_thread_(void* data, CRTHREAD idThis)
 }
 
 #elif defined CR_LINUX
-static CRBOOL _inner_create_device_(AUTHRINF *thinf, CRWWINFO *inf)
+static inline CRBOOL _create_device_(AUTHRINF* thinf, CRWWINFO* inf)
 {
+	CRINT32 dir = 0;
+	CRUINT32 val = 0;
+	snd_pcm_uframes_t periodsize;
+	snd_pcm_hw_params_t* params = NULL;
+	//获取设备句柄
+	if (snd_pcm_open(&thinf->handle, "default", SND_PCM_STREAM_PLAYBACK, 0) < 0)
+		goto Failed;
+	snd_pcm_hw_params_malloc(&params);
+	snd_pcm_hw_params_any(thinf->handle, params);
+	thinf->alsa_can_pause = snd_pcm_hw_params_can_pause(params);
+	snd_pcm_hw_params_set_access(thinf->handle, params, SND_PCM_ACCESS_RW_INTERLEAVED);
+	//
+	if (inf->BitsPerSample == 8)
+		snd_pcm_hw_params_set_format(thinf->handle, params, SND_PCM_FORMAT_U8);
+	else
+		snd_pcm_hw_params_set_format(thinf->handle, params, SND_PCM_FORMAT_S16_LE);
+	//
+	snd_pcm_hw_params_set_channels(thinf->handle, params, inf->NumChannels);
+	val = inf->SampleRate;
+	snd_pcm_hw_params_set_rate_near(thinf->handle, params, &val, &dir);
+	periodsize = 1024;
+	snd_pcm_hw_params_set_period_size(thinf->handle, params, periodsize, 0);
+	thinf->frames = periodsize << 1;
+	snd_pcm_hw_params_set_buffer_size(thinf->handle, params, thinf->frames);
+	if (snd_pcm_hw_params(thinf->handle, params) < 0)
+		goto Failed;
+	snd_pcm_hw_params_free(params);
 	return CRTRUE;
+Failed:
+	if (params)
+		snd_pcm_hw_params_free(params);
+	return CRFALSE;
+}
+
+static void _inner_audio_thread_(void* data, CRTHREAD idThis)
+{
+	AUTHRINF* auinf = (AUTHRINF*)data;
+	CRBOOL paused = CRTRUE;
+	CRINT32 rc;
+	CRUINT8* pData = CRAlloc(NULL, auinf->frames * auinf->inf->BlockAlign);
+	if (!pData)
+		return;
+	while (!auinf->stop)
+	{
+		if (!paused)
+		{
+			if (auinf->pause)
+			{
+				if (auinf->alsa_can_pause)
+					snd_pcm_pause(auinf->handle, 1);
+				else
+					snd_pcm_drop(auinf->handle);
+				paused = CRTRUE;
+			}
+			else
+			{
+				auinf->cbk(pData, auinf->frames, auinf->frames * auinf->inf->BlockAlign);
+				while (rc = snd_pcm_writei(auinf->handle, pData, auinf->frames) < 0)
+				{
+					if (rc == -EPIPE)
+						snd_pcm_prepare(auinf->handle);
+				}
+			}
+		}
+		else
+		{
+			if (!auinf->pause)
+			{
+				if (auinf->alsa_can_pause)
+					snd_pcm_pause(auinf->handle, 0);
+				else
+					snd_pcm_prepare(auinf->handle);
+				paused = CRFALSE;
+			}
+			else
+				CRSleep(1);
+		}
+	}
+	snd_pcm_drain(auinf->handle);
+	snd_pcm_close(auinf->handle);
+	CRAlloc(pData, 0);
 }
 #endif
 
+#ifdef CR_WINDOWS
 CRAPI CRAUDIO CRAudioCreate(CRAudioStreamCbk cbk, CRWWINFO* inf)
 {
 	if (!cbk)
@@ -316,6 +397,40 @@ Failed:
 	CR_LOG_ERR("auto", "an error heppened while creating audio device");
 	return NULL;
 }
+#elif defined CR_LINUX
+CRAPI CRAUDIO CRAudioCreate(CRAudioStreamCbk cbk, CRWWINFO* inf)
+{
+	if (!cbk)
+	{
+		CR_LOG_WAR("auto", "callback function is NULL");
+		return NULL;
+	}
+	if (!inf)
+	{
+		CR_LOG_WAR("auto", "invalid inf");
+		return NULL;
+	}
+	AUTHRINF *thinf = CRAlloc(NULL, sizeof(AUTHRINF));
+	if (!thinf)
+	{
+		CR_LOG_ERR("auto", "bad alloc");
+		return NULL;
+	}
+	thinf->stream = CRTRUE;
+	thinf->cbk = cbk;
+	thinf->inf = inf;
+	thinf->pause = CRTRUE;
+	if (!_create_device_(thinf, inf))
+		goto Failed;
+	thinf->idThis = CRThread(_inner_audio_thread_, thinf);
+	return thinf;
+Failed:
+	if (thinf->handle)
+		snd_pcm_close(thinf->handle);
+	CR_LOG_ERR("auto", "an error heppened while creating audio device");
+	return NULL;
+}
+#endif
 
 static CRBOOL _inner_compare_chars_(const char* chars1, const char* chars2, CRUINT32 len)
 {
